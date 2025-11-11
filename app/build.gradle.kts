@@ -52,6 +52,7 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.okhttp)
     implementation(libs.nanohttpd)
+    implementation(libs.paho.mqtt)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

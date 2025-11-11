@@ -11,6 +11,7 @@ import android.os.PowerManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import android.view.accessibility.AccessibilityEvent
 import androidx.core.app.NotificationCompat
 import com.dar.checker.MainActivity
 import com.dar.checker.R
@@ -20,19 +21,16 @@ import com.dar.checker.data.StoredNotification
 import com.dar.checker.data.SentStore
 import com.dar.checker.data.SentRecord
 import com.dar.checker.logging.LogBus
+import com.dar.checker.network.MqttClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 
 class PaymentNotificationListenerService : NotificationListenerService() {
 
     private val ioScope = CoroutineScope(Dispatchers.IO)
-    private val httpClient by lazy { OkHttpClient() }
+    private val mqttClient by lazy { MqttClient(applicationContext) }
     private val settings by lazy { SettingsRepository(applicationContext) }
     private val store by lazy { NotificationStore(applicationContext) }
     private val sent by lazy { SentStore(applicationContext) }
@@ -43,11 +41,18 @@ class PaymentNotificationListenerService : NotificationListenerService() {
         createNotificationChannel()
         startForegroundService()
         acquireWakeLock()
+        
+        // Conectar MQTT al inicio y mantener conexión persistente
+        ioScope.launch {
+            connectMqttWithRetry()
+            startMqttKeepAlive()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         releaseWakeLock()
+        mqttClient.disconnect()
     }
 
     private fun createNotificationChannel() {
@@ -90,8 +95,9 @@ class PaymentNotificationListenerService : NotificationListenerService() {
             PowerManager.PARTIAL_WAKE_LOCK,
             "PaymentListener::WakeLock"
         ).apply {
-            acquire(10 * 60 * 1000L) // 10 minutes max
+            acquire(10 * 60 * 60 * 1000L) // 10 horas max - mantener activo por horas
         }
+        LogBus.log("Wake lock adquirido por 10 horas para monitoreo continuo")
     }
 
     private fun releaseWakeLock() {
@@ -111,6 +117,14 @@ class PaymentNotificationListenerService : NotificationListenerService() {
         val text = extras.getCharSequence("android.text")?.toString().orEmpty()
         val bigText = extras.getCharSequence("android.bigText")?.toString().orEmpty()
         val packageName = sbn.packageName
+        
+        // Detección múltiple para Yape - verificar todas las variantes posibles
+        val isYapeNotification = packageName == "com.bcp.bo.wallet" || 
+                                packageName.contains("yape") || 
+                                packageName.contains("bcp") ||
+                                title.contains("yape", ignoreCase = true) ||
+                                text.contains("yape", ignoreCase = true) ||
+                                bigText.contains("yape", ignoreCase = true)
         store.add(
             StoredNotification(
                 packageName = packageName,
@@ -125,7 +139,7 @@ class PaymentNotificationListenerService : NotificationListenerService() {
         // Basic heuristic: look for payment-related keywords. User can refine filter later.
         val contentJoined = listOf(title, text, bigText).joinToString(" ").lowercase()
         val seemsPayment =
-            listOf("pago", "pagaste", "recibiste", "payment", "paid", "deposito", "depósito")
+            listOf("pago", "pagaste", "recibiste", "payment", "paid", "deposito", "depósito", "yape", "transferencia", "dinero")
                 .any { it in contentJoined }
 
         // Log all notifications
@@ -140,10 +154,29 @@ class PaymentNotificationListenerService : NotificationListenerService() {
                     return@launch
                 }
 
-                val shouldSend = if (settings.isSendAllNotifications()) true else seemsPayment
-                if (!shouldSend) return@launch
+                // Priorizar notificaciones de Yape o seguir lógica normal
+                val shouldSend = if (isYapeNotification) {
+                    LogBus.log("Notificación de Yape detectada - ENVIANDO INMEDIATAMENTE")
+                    true
+                } else if (settings.isSendAllNotifications()) {
+                    true
+                } else {
+                    seemsPayment
+                }
+                
+                if (!shouldSend) {
+                    LogBus.log("Notificación no cumple criterios de envío")
+                    return@launch
+                }
 
                 val payloadText = if (bigText.isNotBlank()) bigText else text
+                val normalizedText = normalizeText(payloadText)
+                
+                // Verificar que hay texto válido para enviar (el texto es lo importante)
+                if (normalizedText.isBlank()) {
+                    LogBus.log("Notificación sin texto válido, no se envía")
+                    return@launch
+                }
 
                 // De-duplicate: avoid sending the exact same payload repeatedly within a short window
                 val dedupeKey = packageName + "|" + title + "|" + payloadText
@@ -154,40 +187,48 @@ class PaymentNotificationListenerService : NotificationListenerService() {
 
                 val json = JSONObject().apply {
                     put("package", packageName)
-                    put("title", title)
-                    put("text", payloadText)
+                    put("title", normalizeText(title))
+                    put("text", normalizedText)
                     put("postTime", sbn.postTime)
                 }
 
-                val mediaType = "application/json; charset=utf-8".toMediaType()
-                val body = json.toString().toRequestBody(mediaType)
-                val base = settings.getServerHost().trimEnd('/')
-                val request = Request.Builder()
-                    .url(base + "/payment-received")
-                    .post(body)
-                    .build()
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        val code = response.code
-                        val respBody = response.body?.string().orEmpty()
-                        Log.w(TAG, "POST failed: " + code + " " + respBody)
-                        LogBus.log("POST " + base + "/payment-received falló: " + code + " " + respBody)
+                // Log del contenido que se va a enviar
+                LogBus.log("Contenido a enviar - Título: '${normalizeText(title)}', Texto: '$normalizedText'")
+                
+                // Enviar usando conexión persistente (más rápido)
+                if (isYapeNotification) {
+                    LogBus.log("🚀 ENVIANDO NOTIFICACIÓN DE YAPE VIA MQTT - MÁXIMA PRIORIDAD")
+                } else {
+                    LogBus.log("Enviando notificación de pago via MQTT...")
+                }
+                
+                val success = mqttClient.publishMessage(json.toString())
+                if (success) {
+                    Log.i(TAG, "Payment notification sent via MQTT")
+                    if (isYapeNotification) {
+                        LogBus.log("✅ NOTIFICACIÓN DE YAPE ENVIADA EXITOSAMENTE VIA MQTT")
                     } else {
-                        Log.i(TAG, "Payment notification forwarded")
-                        LogBus.log("JSON enviado a " + base + "/payment-received")
-                        sent.add(
-                            SentRecord(
-                                text = json.toString(),
-                                url = base + "/payment-received",
-                                code = response.code,
-                                time = System.currentTimeMillis()
-                            )
+                        LogBus.log("JSON enviado via MQTT")
+                    }
+                    sent.add(
+                        SentRecord(
+                            text = json.toString(),
+                            url = "MQTT: ${settings.getMqttTopic()}",
+                            code = 200,
+                            time = System.currentTimeMillis()
                         )
+                    )
+                } else {
+                    Log.w(TAG, "Failed to send MQTT message")
+                    if (isYapeNotification) {
+                        LogBus.log("❌ ERROR ENVIANDO NOTIFICACIÓN DE YAPE VIA MQTT")
+                    } else {
+                        LogBus.log("Error enviando mensaje MQTT")
                     }
                 }
             } catch (t: Throwable) {
-                Log.e(TAG, "Error posting payment notification", t)
-                LogBus.log("Error al enviar POST: " + t.message)
+                Log.e(TAG, "Error sending MQTT notification", t)
+                LogBus.log("Error al enviar MQTT: " + t.message)
             }
         }
     }
@@ -235,6 +276,136 @@ class PaymentNotificationListenerService : NotificationListenerService() {
             }
         }
     }
+    
+    private suspend fun connectMqttWithRetry() {
+        var attempts = 0
+        val maxAttempts = 5
+        
+        while (attempts < maxAttempts) {
+            try {
+                val success = mqttClient.connect()
+                if (success) {
+                    LogBus.log("MQTT conectado exitosamente después de ${attempts + 1} intentos")
+                    return
+                }
+            } catch (e: Exception) {
+                LogBus.log("Error conectando MQTT (intento ${attempts + 1}): ${e.message}")
+            }
+            
+            attempts++
+            if (attempts < maxAttempts) {
+                kotlinx.coroutines.delay(5000) // Esperar 5 segundos antes del siguiente intento
+            }
+        }
+        
+        LogBus.log("Error: No se pudo conectar MQTT después de $maxAttempts intentos")
+    }
+    
+    private suspend fun startMqttKeepAlive() {
+        while (true) {
+            try {
+                kotlinx.coroutines.delay(30000) // Verificar cada 30 segundos para máxima confiabilidad
+                
+                if (!mqttClient.isConnected()) {
+                    LogBus.log("MQTT desconectado detectado, intentando reconectar...")
+                    connectMqttWithRetry()
+                } else {
+                    LogBus.log("MQTT keep-alive: Conexión activa - Listo para Yape")
+                }
+            } catch (e: Exception) {
+                LogBus.log("Error en keep-alive MQTT: ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * Normaliza texto removiendo acentos y caracteres especiales
+     */
+    private fun normalizeText(text: String): String {
+        if (text.isBlank()) return text
+        
+        return text
+            .replace("á", "a")
+            .replace("é", "e")
+            .replace("í", "i")
+            .replace("ó", "o")
+            .replace("ú", "u")
+            .replace("ñ", "n")
+            .replace("Á", "A")
+            .replace("É", "E")
+            .replace("Í", "I")
+            .replace("Ó", "O")
+            .replace("Ú", "U")
+            .replace("Ñ", "N")
+            .replace("ü", "u")
+            .replace("Ü", "U")
+            .replace("ç", "c")
+            .replace("Ç", "C")
+            // Remover otros caracteres especiales comunes
+            .replace("¿", "")
+            .replace("¡", "")
+            .replace("?", "")
+            .replace("!", "")
+            .replace("$", "")
+            .replace("€", "")
+            .replace("£", "")
+            .replace("¥", "")
+            .replace("°", "")
+            .replace("º", "")
+            .replace("ª", "")
+            .replace("§", "")
+            .replace("¶", "")
+            .replace("†", "")
+            .replace("‡", "")
+            .replace("•", "")
+            .replace("…", "...")
+            .replace("–", "-")
+            .replace("—", "-")
+            .replace(""", "\"")
+            .replace(""", "\"")
+            .replace("'", "'")
+            .replace("'", "'")
+            .replace("«", "\"")
+            .replace("»", "\"")
+            .replace("‹", "<")
+            .replace("›", ">")
+            .replace("„", "\"")
+            .replace("‚", "'")
+            .replace("‰", "%")
+            .replace("‱", "%")
+            .replace("′", "'")
+            .replace("″", "\"")
+            .replace("‴", "'")
+            .replace("‵", "`")
+            .replace("‶", "\"")
+            .replace("‷", "'")
+            .replace("‸", "<")
+            .replace("‹", "<")
+            .replace("›", ">")
+            .replace("※", "*")
+            .replace("‼", "!!")
+            .replace("⁇", "??")
+            .replace("⁈", "?!")
+            .replace("⁉", "!?")
+            .replace("⁏", ";")
+            .replace("⁐", ":")
+            .replace("⁑", "**")
+            .replace("⁒", "***")
+            .replace("⁓", "~")
+            .replace("⁔", "+")
+            .replace("⁕", "*")
+            .replace("⁖", "**")
+            .replace("⁗", "***")
+            .replace("⁘", "****")
+            .replace("⁙", "*****")
+            .replace("⁚", "**")
+            .replace("⁛", "***")
+            .replace("⁜", "****")
+            .replace("⁝", "*****")
+            .replace("⁞", "******")
+            .trim()
+    }
+    
 }
 
 

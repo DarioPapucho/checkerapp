@@ -58,6 +58,38 @@ class SettingsRepository(context: Context) {
         prefs.edit().putString(KEY_ALLOWED, set.joinToString(",")).apply()
     }
 
+    fun getMqttBroker(): String {
+        return prefs.getString(KEY_MQTT_BROKER, DEFAULT_MQTT_BROKER) ?: DEFAULT_MQTT_BROKER
+    }
+
+    fun setMqttBroker(broker: String) {
+        prefs.edit().putString(KEY_MQTT_BROKER, broker).apply()
+    }
+
+    fun getMqttTopic(): String {
+        return prefs.getString(KEY_MQTT_TOPIC, DEFAULT_MQTT_TOPIC) ?: DEFAULT_MQTT_TOPIC
+    }
+
+    fun setMqttTopic(topic: String) {
+        prefs.edit().putString(KEY_MQTT_TOPIC, topic).apply()
+    }
+
+    fun getMqttClientId(): String {
+        return prefs.getString(KEY_MQTT_CLIENT_ID, DEFAULT_MQTT_CLIENT_ID) ?: DEFAULT_MQTT_CLIENT_ID
+    }
+
+    fun setMqttClientId(clientId: String) {
+        prefs.edit().putString(KEY_MQTT_CLIENT_ID, clientId).apply()
+    }
+
+    fun isMqttConnected(): Boolean {
+        return prefs.getBoolean(KEY_MQTT_CONNECTED, false)
+    }
+
+    fun setMqttConnected(connected: Boolean) {
+        prefs.edit().putBoolean(KEY_MQTT_CONNECTED, connected).apply()
+    }
+
     companion object {
         private const val PREFS_NAME = "checker_settings"
         private const val KEY_HOST = "server_host"
@@ -65,7 +97,14 @@ class SettingsRepository(context: Context) {
         private const val KEY_FILTER_ENABLED = "filter_enabled"
         private const val KEY_SEND_ALL = "send_all"
         private const val KEY_LOGGING_ENABLED = "logging_enabled"
+        private const val KEY_MQTT_BROKER = "mqtt_broker"
+        private const val KEY_MQTT_TOPIC = "mqtt_topic"
+        private const val KEY_MQTT_CLIENT_ID = "mqtt_client_id"
+        private const val KEY_MQTT_CONNECTED = "mqtt_connected"
         private const val DEFAULT_HOST = "http://localhost:4444"
+        private const val DEFAULT_MQTT_BROKER = "tcp://broker.hivemq.com:1883"
+        private const val DEFAULT_MQTT_TOPIC = "payment-notifications"
+        private const val DEFAULT_MQTT_CLIENT_ID = "checker-app"
     }
 }
 

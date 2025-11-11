@@ -85,6 +85,8 @@ fun HomeScreen(onOpenSettings: () -> Unit, modifier: Modifier = Modifier) {
     val settings = remember { SettingsRepository(context) }
     val sentStore = remember { SentStore(context) }
     var sent by remember { mutableStateOf(sentStore.getAll()) }
+    var mqttConnected by remember { mutableStateOf(settings.isMqttConnected()) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
 
     // Animación de pulso para el estado
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
@@ -106,6 +108,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, modifier: Modifier = Modifier) {
         LogBus.enabled = settings.isLoggingEnabled()
         LogBus.logs.collectLatest {
             sent = sentStore.getAll()
+            mqttConnected = settings.isMqttConnected()
         }
     }
 
@@ -192,6 +195,102 @@ fun HomeScreen(onOpenSettings: () -> Unit, modifier: Modifier = Modifier) {
                             tint = if (hasAccess) AccentGreen else Color(0xFFFF3B3B),
                             modifier = Modifier.size(32.dp)
                         )
+                    }
+                }
+            }
+
+            // Estado MQTT Card
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .shadow(8.dp, RoundedCornerShape(16.dp)),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = CardBackground)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            "ESTADO MQTT",
+                            fontSize = 12.sp,
+                            color = TextSecondary,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            if (mqttConnected) "CONECTADO" else "DESCONECTADO",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (mqttConnected) AccentGreen else Color(0xFFFF3B3B)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "Broker: ${settings.getMqttBroker()}",
+                            fontSize = 12.sp,
+                            color = TextSecondary
+                        )
+                        Text(
+                            "Topic: ${settings.getMqttTopic()}",
+                            fontSize = 12.sp,
+                            color = TextSecondary
+                        )
+                    }
+
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(50.dp)
+                                .clip(RoundedCornerShape(25.dp))
+                                .background(
+                                    if (mqttConnected)
+                                        AccentGreen.copy(alpha = alpha * 0.3f)
+                                    else
+                                        Color(0xFFFF3B3B).copy(alpha = alpha * 0.3f)
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                if (mqttConnected) Icons.Default.CheckCircle else Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = if (mqttConnected) AccentGreen else Color(0xFFFF3B3B),
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                // Reconectar MQTT
+                                scope.launch(Dispatchers.IO) {
+                                    try {
+                                        val mqttClient = com.dar.checker.network.MqttClient(context)
+                                        val success = mqttClient.connect()
+                                        if (success) {
+                                            mqttConnected = true
+                                        }
+                                    } catch (e: Exception) {
+                                        LogBus.log("Error reconectando MQTT: ${e.message}")
+                                    }
+                                }
+                            },
+                            modifier = Modifier.height(32.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (mqttConnected) AccentCyan else AccentPurple
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                if (mqttConnected) "RECONECTAR" else "CONECTAR",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
@@ -367,7 +466,9 @@ fun SettingsScreen(onBack: () -> Unit) {
     val settings = remember { SettingsRepository(context) }
     val store = remember { NotificationStore(context) }
     val sentStore = remember { SentStore(context) }
-    var host by remember { mutableStateOf(settings.getServerHost()) }
+    var mqttBroker by remember { mutableStateOf(settings.getMqttBroker()) }
+    var mqttTopic by remember { mutableStateOf(settings.getMqttTopic()) }
+    var mqttClientId by remember { mutableStateOf(settings.getMqttClientId()) }
     var newPkg by remember { mutableStateOf("") }
     var allowed by remember { mutableStateOf(settings.getAllowedPackages()) }
     var filterEnabled by remember { mutableStateOf(settings.isPackageFilterEnabled()) }
@@ -418,14 +519,66 @@ fun SettingsScreen(onBack: () -> Unit) {
                 .fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Configuración del servidor
+            // Configuración MQTT
             item {
-                SettingsSection(title = "SERVIDOR") {
+                SettingsSection(title = "CONFIGURACIÓN MQTT") {
                     OutlinedTextField(
-                        value = host,
-                        onValueChange = { host = it },
-                        label = { Text("URL del servidor", color = TextSecondary) },
-                        placeholder = { Text("http://192.168.1.10:4444", color = TextSecondary.copy(alpha = 0.5f)) },
+                        value = mqttBroker,
+                        onValueChange = { mqttBroker = it },
+                        label = { Text("Broker MQTT", color = TextSecondary) },
+                        placeholder = { Text("tcp://broker.hivemq.com:1883", color = TextSecondary.copy(alpha = 0.5f)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AccentCyan,
+                            unfocusedBorderColor = TextSecondary.copy(alpha = 0.3f),
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    
+                    // Advertencia si el esquema es incorrecto
+                    if (mqttBroker.startsWith("mqtt://")) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = Color(0xFFFFA500),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                "Use 'tcp://' en lugar de 'mqtt://' para conexiones MQTT",
+                                color = Color(0xFFFFA500),
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = mqttTopic,
+                        onValueChange = { mqttTopic = it },
+                        label = { Text("Topic MQTT", color = TextSecondary) },
+                        placeholder = { Text("payment-notifications", color = TextSecondary.copy(alpha = 0.5f)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AccentCyan,
+                            unfocusedBorderColor = TextSecondary.copy(alpha = 0.3f),
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = mqttClientId,
+                        onValueChange = { mqttClientId = it },
+                        label = { Text("Client ID", color = TextSecondary) },
+                        placeholder = { Text("checker-app", color = TextSecondary.copy(alpha = 0.5f)) },
                         modifier = Modifier.fillMaxWidth(),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = AccentCyan,
@@ -437,30 +590,33 @@ fun SettingsScreen(onBack: () -> Unit) {
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
-                        onClick = { settings.setServerHost(host) },
+                        onClick = { 
+                            settings.setMqttBroker(mqttBroker)
+                            settings.setMqttTopic(mqttTopic)
+                            settings.setMqttClientId(mqttClientId)
+                        },
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(containerColor = AccentPurple),
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Icon(Icons.Default.Check, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("GUARDAR HOST")
+                        Text("GUARDAR CONFIGURACIÓN MQTT")
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = {
                             scope.launch(Dispatchers.IO) {
                                 try {
-                                    val client = okhttp3.OkHttpClient()
-                                    val req = okhttp3.Request.Builder()
-                                        .url(host + "/health")
-                                        .build()
-                                    client.newCall(req).execute().use { resp ->
-                                        LogBus.log("✓ Health ${host}/health -> ${resp.code}")
+                                    val mqttClient = com.dar.checker.network.MqttClient(context)
+                                    val success = mqttClient.connect()
+                                    if (success) {
+                                        LogBus.log("✓ MQTT conectado exitosamente a $mqttBroker")
+                                    } else {
+                                        LogBus.log("✗ Error conectando MQTT a $mqttBroker")
                                     }
                                 } catch (t: Throwable) {
-                                    val name = t::class.simpleName ?: "Exception"
-                                    LogBus.log("✗ Health ${host}/health -> ${name}: ${t.message ?: t.toString()}")
+                                    LogBus.log("✗ Error probando MQTT: ${t.message}")
                                 }
                             }
                         },
@@ -468,9 +624,9 @@ fun SettingsScreen(onBack: () -> Unit) {
                         colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
                         shape = RoundedCornerShape(12.dp)
                     ) {
-                        Icon(Icons.Default.Check, contentDescription = null)
+                        Icon(Icons.Default.CheckCircle, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("PROBAR CONEXIÓN")
+                        Text("PROBAR CONEXIÓN MQTT")
                     }
                     Spacer(modifier = Modifier.height(12.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -489,15 +645,15 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Enviar todas las notificaciones", color = TextPrimary)
                     }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = loggingEnabled, onCheckedChange = {
-                    loggingEnabled = it
-                    settings.setLoggingEnabled(it)
-                    LogBus.enabled = it
-                })
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Habilitar logs", color = TextPrimary)
-            }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = loggingEnabled, onCheckedChange = {
+                            loggingEnabled = it
+                            settings.setLoggingEnabled(it)
+                            LogBus.enabled = it
+                        })
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Habilitar logs", color = TextPrimary)
+                    }
                 }
             }
 
